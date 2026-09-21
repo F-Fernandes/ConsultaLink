@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Cable, Route as RouteIcon, AlertTriangle, Gauge } from "lucide-react";
+import { Cable, Route as RouteIcon, AlertTriangle } from "lucide-react";
 
 /* ---------------------------------------------------------
    Paletas de cores — Telebrás (NBR) e Internacional (TIA/EIA-598)
@@ -18,8 +18,8 @@ const STANDARDS = {
       { name: "Marrom", hex: "#6A4A35", text: "#fff" },
       { name: "Rosa", hex: "#E191AC", text: "#20210f" },
       { name: "Preto", hex: "#201F1D", text: "#fff" },
+      { name: "Cinza", hex: "#71757C", text: "#fff" },
       { name: "Laranja", hex: "#D97A29", text: "#fff" },
-      { name: "Grafite", hex: "#71757C", text: "#fff" },
       { name: "Água", hex: "#1E9EA8", text: "#fff" },
     ],
   },
@@ -58,9 +58,46 @@ const PRESETS = [
 const WAVELENGTHS = [
   { value: 850, label: "850 nm · multimodo", coef: 3.5 },
   { value: 1300, label: "1300 nm · multimodo", coef: 1.5 },
-  { value: 1310, label: "1310 nm · monomodo", coef: 0.35 },
-  { value: 1550, label: "1550 nm · monomodo", coef: 0.22 },
+  { value: 1310, label: "1310 nm · monomodo / GPON upstream", coef: 0.35 },
+  { value: 1490, label: "1490 nm · GPON downstream", coef: 0.25 },
+  { value: 1550, label: "1550 nm · monomodo / vídeo overlay", coef: 0.22 },
   { value: 1625, label: "1625 nm · monomodo", coef: 0.24 },
+];
+
+/* ---------------------------------------------------------
+   Splitters ópticos PLC — perda de inserção típica por razão
+   de divisão (valores de referência, editáveis pelo usuário)
+--------------------------------------------------------- */
+const SPLITTER_RATIOS = [
+  { ratio: 2, loss: 3.5 },
+  { ratio: 4, loss: 7.0 },
+  { ratio: 8, loss: 10.5 },
+  { ratio: 16, loss: 13.5 },
+  { ratio: 32, loss: 17.5 },
+  { ratio: 64, loss: 21.5 },
+];
+
+/* ---------------------------------------------------------
+   Presets de potência Tx injetada (dBm) — pode ser positiva
+   ou negativa dependendo do padrão/equipamento
+--------------------------------------------------------- */
+const TX_PRESETS = [
+  { value: -3, label: "-3 dBm · ONU típica" },
+  { value: 0, label: "0 dBm" },
+  { value: 1.5, label: "+1.5 dBm · mín. Classe B+" },
+  { value: 3, label: "+3 dBm · mín. Classe C+/N" },
+  { value: 5, label: "+5 dBm · máx. Classe B+" },
+  { value: 7, label: "+7 dBm · máx. Classe C+/N" },
+];
+
+/* ---------------------------------------------------------
+   Classes de orçamento óptico GPON (ITU-T G.984.2), em dB
+--------------------------------------------------------- */
+const GPON_CLASSES = [
+  { key: "b+", label: "Classe B+", min: 13, max: 28 },
+  { key: "c+", label: "Classe C+", min: 17, max: 32 },
+  { key: "n1", label: "Classe N1", min: 14, max: 29 },
+  { key: "n2", label: "Classe N2", min: 16, max: 31 },
 ];
 
 /* ---------------------------------------------------------
@@ -367,24 +404,41 @@ function RouteTab() {
   const [distanceKm, setDistanceKm] = useState("12.5");
   const [spliceCount, setSpliceCount] = useState(3);
   const [spliceLoss, setSpliceLoss] = useState(0.1);
-  const [wavelength, setWavelength] = useState(1550);
+  const [wavelength, setWavelength] = useState(1490);
   const [coefOverride, setCoefOverride] = useState(null);
 
-  const [budgetOn, setBudgetOn] = useState(false);
-  const [txPower, setTxPower] = useState(0);
-  const [rxSensitivity, setRxSensitivity] = useState(-23);
+  const [stages, setStages] = useState([]);
+  const [gponClassKey, setGponClassKey] = useState(null);
+
+  const [txInjected, setTxInjected] = useState(3);
 
   const wl = WAVELENGTHS.find((w) => w.value === Number(wavelength));
   const coef = coefOverride !== null && coefOverride !== "" ? Number(coefOverride) : wl.coef;
+
+  const addStage = () => {
+    const def = SPLITTER_RATIOS[2]; // 1x8 como padrão
+    setStages([...stages, { id: Date.now() + Math.random(), ratio: def.ratio, loss: def.loss }]);
+  };
+  const removeStage = (id) => setStages(stages.filter((s) => s.id !== id));
+  const updateStageRatio = (id, ratio) => {
+    const preset = SPLITTER_RATIOS.find((r) => r.ratio === Number(ratio));
+    setStages(stages.map((s) => (s.id === id ? { ...s, ratio: Number(ratio), loss: preset.loss } : s)));
+  };
+  const updateStageLoss = (id, loss) =>
+    setStages(stages.map((s) => (s.id === id ? { ...s, loss } : s)));
+
+  const totalSplitterLoss = stages.reduce((sum, s) => sum + (Number(s.loss) || 0), 0);
+  const totalSplitRatio = stages.reduce((mult, s) => mult * (Number(s.ratio) || 1), 1);
 
   const dist = Number(distanceKm) || 0;
   const splices = Number(spliceCount) || 0;
   const lossFiber = dist * coef;
   const lossSplices = splices * (Number(spliceLoss) || 0);
-  const total = lossFiber + lossSplices;
+  const total = lossFiber + lossSplices + totalSplitterLoss;
 
-  const budgetAvailable = Number(txPower) - Number(rxSensitivity);
-  const margin = budgetAvailable - total;
+  const gponClass = GPON_CLASSES.find((c) => c.key === gponClassKey);
+
+  const receivedPower = (Number(txInjected) || 0) - total;
 
   return (
     <div className="flex flex-col gap-6">
@@ -511,6 +565,156 @@ function RouteTab() {
         </div>
       </div>
 
+      <div>
+        <label className="text-xs mb-1.5 block" style={{ color: "#8A94A6" }}>
+          Potência Tx injetada
+        </label>
+        <div className="relative max-w-[180px] mb-2">
+          <input
+            type="number"
+            step="0.1"
+            value={txInjected}
+            onChange={(e) => setTxInjected(e.target.value)}
+            className="w-full rounded-md px-3 py-2 pr-10 text-sm outline-none"
+            style={{
+              fontFamily: "'JetBrains Mono', monospace",
+              background: "#0B0D10",
+              color: "#E9ECEF",
+              border: "1px solid #1E9EA8",
+            }}
+          />
+          <span
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-xs"
+            style={{ color: "#5C6472" }}
+          >
+            dBm
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {TX_PRESETS.map((p) => {
+            const active = Number(txInjected) === p.value;
+            return (
+              <button
+                key={p.value}
+                onClick={() => setTxInjected(p.value)}
+                className="px-2 py-1 rounded-md text-[11px]"
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  background: active ? "#1E9EA8" : "#14171C",
+                  color: active ? "#0B0D10" : "#8A94A6",
+                  border: `1px solid ${active ? "#1E9EA8" : "#262B33"}`,
+                }}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[11px] mt-1.5" style={{ color: "#5C6472" }}>
+          Pode ser positiva ou negativa conforme o equipamento/padrão de Tx.
+        </p>
+      </div>
+
+      {/* Splitters — rede GPON */}
+      <div className="rounded-xl p-5" style={{ background: "#14171C", border: "1px solid #262B33" }}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-sm font-medium" style={{ color: "#E9ECEF" }}>
+            Splitters (rede GPON)
+          </span>
+          <button
+            onClick={addStage}
+            className="text-xs px-2.5 py-1.5 rounded-md"
+            style={{ background: "#1E9EA8", color: "#0B0D10", fontWeight: 500 }}
+          >
+            + Adicionar estágio
+          </button>
+        </div>
+        <p className="text-xs mb-3" style={{ color: "#5C6472" }}>
+          Adicione um estágio para cada splitter no caminho até a ONU — a ordem não altera a perda
+          total, só a soma. Ex.: 1×4 + 1×8 = dois estágios em cascata.
+        </p>
+
+        {stages.length === 0 && (
+          <p className="text-sm" style={{ color: "#5C6472" }}>
+            Nenhum splitter adicionado — a rota está sendo calculada ponto a ponto.
+          </p>
+        )}
+
+        <div className="flex flex-col gap-2">
+          {stages.map((s, idx) => (
+            <div
+              key={s.id}
+              className="flex items-center gap-2 rounded-md p-2"
+              style={{ background: "#0B0D10", border: "1px solid #262B33" }}
+            >
+              <span
+                className="text-xs w-6 text-center shrink-0"
+                style={{ color: "#5C6472", fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                {idx + 1}º
+              </span>
+              <select
+                value={s.ratio}
+                onChange={(e) => updateStageRatio(s.id, e.target.value)}
+                className="rounded-md px-2 py-1.5 text-sm outline-none"
+                style={{ background: "#14171C", color: "#E9ECEF", border: "1px solid #262B33" }}
+              >
+                {SPLITTER_RATIOS.map((r) => (
+                  <option key={r.ratio} value={r.ratio}>
+                    1×{r.ratio}
+                  </option>
+                ))}
+              </select>
+              <div className="relative flex-1">
+                <input
+                  type="number"
+                  step="0.1"
+                  value={s.loss}
+                  onChange={(e) => updateStageLoss(s.id, e.target.value)}
+                  className="w-full rounded-md px-2 py-1.5 pr-9 text-sm outline-none"
+                  style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    background: "#14171C",
+                    color: "#E9ECEF",
+                    border: "1px solid #262B33",
+                  }}
+                />
+                <span
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px]"
+                  style={{ color: "#5C6472" }}
+                >
+                  dB
+                </span>
+              </div>
+              <button
+                onClick={() => removeStage(s.id)}
+                className="text-xs px-2 py-1.5 rounded-md shrink-0"
+                style={{ background: "transparent", color: "#C4544A", border: "1px solid #3a2a2a" }}
+              >
+                remover
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {stages.length > 0 && (
+          <div
+            className="mt-3 pt-3 flex items-center justify-between text-sm"
+            style={{ borderTop: "1px solid #262B33", color: "#C4CBD6" }}
+          >
+            <span>
+              Divisão total: <strong style={{ color: "#E9ECEF" }}>1:{totalSplitRatio}</strong>{" "}
+              <span style={{ color: "#5C6472" }}>
+                ({stages.map((s) => `1×${s.ratio}`).join(" + ")})
+              </span>
+            </span>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+              {totalSplitterLoss.toFixed(2)} dB
+            </span>
+          </div>
+        )}
+      </div>
+
       {/* Resultado */}
       <div className="rounded-xl p-5" style={{ background: "#14171C", border: "1px solid #262B33" }}>
         <div className="text-xs mb-3" style={{ color: "#8A94A6" }}>
@@ -519,6 +723,12 @@ function RouteTab() {
         <ul className="flex flex-col gap-1.5 text-sm" style={{ color: "#C4CBD6" }}>
           <LineItem label={`Fibra: ${dist} km × ${coef} dB/km`} value={lossFiber} />
           <LineItem label={`Emendas: ${splices} × ${Number(spliceLoss) || 0} dB`} value={lossSplices} />
+          {stages.length > 0 && (
+            <LineItem
+              label={`Splitters: ${stages.map((s) => `1×${s.ratio}`).join(" + ")}`}
+              value={totalSplitterLoss}
+            />
+          )}
         </ul>
         <div
           className="mt-4 pt-4 flex items-baseline justify-between"
@@ -534,89 +744,248 @@ function RouteTab() {
             {total.toFixed(2)} dB
           </span>
         </div>
+        <div
+          className="mt-2 pt-2 flex items-baseline justify-between"
+          style={{ borderTop: "1px dashed #262B33" }}
+        >
+          <span className="text-xs" style={{ color: "#5C6472" }}>
+            Potência recebida ({Number(txInjected)} dBm Tx − {total.toFixed(2)} dB)
+          </span>
+          <span
+            className="text-base font-medium"
+            style={{ color: "#C4CBD6", fontFamily: "'JetBrains Mono', monospace" }}
+          >
+            {receivedPower.toFixed(2)} dBm
+          </span>
+        </div>
       </div>
 
-      {/* Orçamento óptico opcional */}
+      {/* Classe de orçamento GPON */}
       <div className="rounded-xl p-5" style={{ background: "#14171C", border: "1px solid #262B33" }}>
-        <button
-          onClick={() => setBudgetOn(!budgetOn)}
-          className="flex items-center gap-2 text-sm w-full text-left"
-          style={{ color: "#C4CBD6" }}
-        >
-          <Gauge size={16} style={{ color: "#1E9EA8" }} />
-          Comparar com orçamento óptico do equipamento
-          <span className="ml-auto text-xs" style={{ color: "#5C6472" }}>
-            {budgetOn ? "ocultar" : "mostrar"}
-          </span>
-        </button>
-        {budgetOn && (
-          <div className="mt-4 flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs mb-1.5 block" style={{ color: "#8A94A6" }}>
-                  Potência Tx
-                </label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={txPower}
-                  onChange={(e) => setTxPower(e.target.value)}
-                  className="w-full rounded-md px-3 py-2 text-sm outline-none"
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    background: "#0B0D10",
-                    color: "#E9ECEF",
-                    border: "1px solid #262B33",
-                  }}
-                />
-                <div className="text-[11px] mt-1" style={{ color: "#5C6472" }}>
-                  dBm
-                </div>
-              </div>
-              <div>
-                <label className="text-xs mb-1.5 block" style={{ color: "#8A94A6" }}>
-                  Sensibilidade Rx
-                </label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={rxSensitivity}
-                  onChange={(e) => setRxSensitivity(e.target.value)}
-                  className="w-full rounded-md px-3 py-2 text-sm outline-none"
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    background: "#0B0D10",
-                    color: "#E9ECEF",
-                    border: "1px solid #262B33",
-                  }}
-                />
-                <div className="text-[11px] mt-1" style={{ color: "#5C6472" }}>
-                  dBm
-                </div>
-              </div>
-            </div>
-            <div className="flex items-baseline justify-between">
+        <div className="text-sm font-medium mb-1" style={{ color: "#E9ECEF" }}>
+          Comparar com classe GPON (ITU-T G.984.2)
+        </div>
+        <p className="text-xs mb-3" style={{ color: "#5C6472" }}>
+          Cada classe define uma faixa de orçamento óptico aceita entre OLT e ONU.
+        </p>
+        <div className="flex flex-wrap gap-2 mb-4">
+          {GPON_CLASSES.map((c) => {
+            const active = gponClassKey === c.key;
+            return (
+              <button
+                key={c.key}
+                onClick={() => setGponClassKey(active ? null : c.key)}
+                className="px-3 py-1.5 rounded-md text-sm"
+                style={{
+                  background: active ? "#1E9EA8" : "#0B0D10",
+                  color: active ? "#0B0D10" : "#C4CBD6",
+                  border: `1px solid ${active ? "#1E9EA8" : "#262B33"}`,
+                }}
+              >
+                {c.label}
+                <span
+                  className="ml-1.5 text-[11px]"
+                  style={{ color: active ? "#0B0D10" : "#5C6472" }}
+                >
+                  {c.min}–{c.max} dB
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {gponClass && (
+          <div>
+            <div className="flex items-baseline justify-between mb-1">
               <span className="text-sm" style={{ color: "#8A94A6" }}>
-                Margem líquida do link
+                Perda total × faixa da {gponClass.label}
               </span>
               <span
                 className="text-xl font-semibold"
                 style={{
-                  color: margin >= 0 ? "#4FAE7A" : "#C4544A",
+                  color:
+                    total < gponClass.min
+                      ? "#E3B84A"
+                      : total <= gponClass.max
+                      ? "#4FAE7A"
+                      : "#C4544A",
                   fontFamily: "'JetBrains Mono', monospace",
                 }}
               >
-                {margin.toFixed(2)} dB
+                {total.toFixed(2)} dB
               </span>
             </div>
             <p className="text-xs" style={{ color: "#5C6472" }}>
-              {margin >= 0
-                ? "O orçamento óptico cobre a perda estimada do link."
-                : "A perda estimada excede o orçamento óptico disponível."}
+              {total < gponClass.min &&
+                "Perda abaixo do mínimo da classe — risco de saturação do receptor (sinal forte demais); considere atenuador ou revisar a classe."}
+              {total >= gponClass.min &&
+                total <= gponClass.max &&
+                `Dentro da faixa da ${gponClass.label} — margem até o limite: ${(gponClass.max - total).toFixed(2)} dB.`}
+              {total > gponClass.max &&
+                `Perda acima do limite da ${gponClass.label} em ${(total - gponClass.max).toFixed(2)} dB — o link tende a não fechar.`}
             </p>
           </div>
         )}
       </div>
+
+      {/* Diagrama unifilar */}
+      <div className="rounded-xl p-5" style={{ background: "#14171C", border: "1px solid #262B33" }}>
+        <div className="text-sm font-medium mb-3" style={{ color: "#E9ECEF" }}>
+          Diagrama unifilar da rota
+        </div>
+        <UnifilarDiagram distanceKm={dist} spliceCount={splices} stages={stages} />
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-4 text-xs" style={{ color: "#8A94A6" }}>
+          <span>
+            Distância: <strong style={{ color: "#C4CBD6" }}>{dist} km</strong>
+          </span>
+          <span>
+            Caixas de emenda: <strong style={{ color: "#C4CBD6" }}>{splices}</strong>
+          </span>
+          <span>
+            Splitters:{" "}
+            <strong style={{ color: "#C4CBD6" }}>
+              {stages.length > 0
+                ? `${stages.map((s) => `1×${s.ratio}`).join(" + ")} (total 1:${totalSplitRatio})`
+                : "nenhum"}
+            </strong>
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Diagrama unifilar — OLT → caixas de emenda → splitters → ONU
+--------------------------------------------------------- */
+function UnifilarDiagram({ distanceKm, spliceCount, stages }) {
+  const nodes = [
+    { type: "olt" },
+    ...(Number(spliceCount) > 0 ? [{ type: "splice", count: Number(spliceCount) }] : []),
+    ...stages.map((s) => ({ type: "splitter", ratio: s.ratio })),
+    { type: "onu" },
+  ];
+
+  const spacing = 130;
+  const marginX = 50;
+  const width = marginX * 2 + (nodes.length - 1) * spacing;
+  const height = 130;
+  const cy = 62;
+
+  return (
+    <div className="overflow-x-auto">
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ minWidth: width }}>
+        <defs>
+          <marker
+            id="unifilar-arrow"
+            viewBox="0 0 10 10"
+            refX="8"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto-start-reverse"
+          >
+            <path d="M0,0 L10,5 L0,10 z" fill="#3a3f47" />
+          </marker>
+        </defs>
+
+        {nodes.slice(0, -1).map((_, i) => {
+          const x1 = marginX + i * spacing;
+          const x2 = marginX + (i + 1) * spacing;
+          const isLast = i === nodes.length - 2;
+          return (
+            <line
+              key={`edge-${i}`}
+              x1={x1}
+              y1={cy}
+              x2={x2}
+              y2={cy}
+              stroke="#3a3f47"
+              strokeWidth="2"
+              markerEnd={isLast ? "url(#unifilar-arrow)" : undefined}
+            />
+          );
+        })}
+
+        {nodes.map((n, i) => {
+          const cx = marginX + i * spacing;
+
+          if (n.type === "olt" || n.type === "onu") {
+            const isOlt = n.type === "olt";
+            return (
+              <g key={i}>
+                <rect
+                  x={cx - 28}
+                  y={cy - 18}
+                  width="56"
+                  height="36"
+                  rx="8"
+                  fill={isOlt ? "#1E9EA8" : "#4FAE7A"}
+                />
+                <text
+                  x={cx}
+                  y={cy + 5}
+                  textAnchor="middle"
+                  fontSize="12"
+                  fontWeight="700"
+                  fill="#0B0D10"
+                  fontFamily="'JetBrains Mono', monospace"
+                >
+                  {isOlt ? "OLT" : "ONU"}
+                </text>
+                <text x={cx} y={cy - 28} textAnchor="middle" fontSize="10" fill="#8A94A6">
+                  {isOlt ? "Início" : "Fim"}
+                </text>
+              </g>
+            );
+          }
+
+          if (n.type === "splice") {
+            return (
+              <g key={i}>
+                <rect x={cx - 14} y={cy - 14} width="28" height="28" rx="4" fill="#D97A29" />
+                <text x={cx} y={cy - 24} textAnchor="middle" fontSize="10" fill="#8A94A6">
+                  Emenda
+                </text>
+                <text
+                  x={cx}
+                  y={cy + 32}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fill="#C4CBD6"
+                  fontFamily="'JetBrains Mono', monospace"
+                >
+                  ×{n.count}
+                </text>
+              </g>
+            );
+          }
+
+          if (n.type === "splitter") {
+            return (
+              <g key={i}>
+                <polygon
+                  points={`${cx - 16},${cy - 16} ${cx - 16},${cy + 16} ${cx + 16},${cy}`}
+                  fill="#6A3E93"
+                />
+                <text x={cx} y={cy - 24} textAnchor="middle" fontSize="10" fill="#8A94A6">
+                  Splitter
+                </text>
+                <text
+                  x={cx}
+                  y={cy + 32}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fill="#C4CBD6"
+                  fontFamily="'JetBrains Mono', monospace"
+                >
+                  1×{n.ratio}
+                </text>
+              </g>
+            );
+          }
+          return null;
+        })}
+      </svg>
     </div>
   );
 }
