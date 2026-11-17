@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
-import { Cable, Route as RouteIcon, AlertTriangle } from "lucide-react";
+import { Cable, Route as RouteIcon, AlertTriangle, MapPin } from "lucide-react";
+import OtdrTab from "./OtdrTab.jsx";
 
 /* ---------------------------------------------------------
    Paletas de cores — Telebrás (NBR) e Internacional (TIA/EIA-598)
@@ -1017,20 +1018,20 @@ export default function App() {
         input[type=number]::-webkit-inner-spin-button { opacity: 0.4; }
       `}</style>
 
-      <div className="w-full max-w-2xl">
+      <div className={`w-full ${tab === "otdr" ? "max-w-5xl" : "max-w-2xl"}`}>
         <header className="mb-6">
           <h1 className="text-2xl font-semibold" style={{ color: "#E9ECEF" }}>
             Consulta-link
           </h1>
           <p className="text-sm mt-1" style={{ color: "#8A94A6" }}>
-            Identificação de fibras ópticas e orçamento de perda de rota
+            Identificação de fibras, orçamento de perda e localização de atenuações
           </p>
         </header>
 
         <div className="flex gap-1 mb-6 p-1 rounded-lg" style={{ background: "#14171C" }}>
           <button
             onClick={() => setTab("fiber")}
-            className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-colors"
+            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-md text-xs sm:text-sm font-medium transition-colors"
             style={{
               background: tab === "fiber" ? "#1E9EA8" : "transparent",
               color: tab === "fiber" ? "#0B0D10" : "#8A94A6",
@@ -1041,7 +1042,7 @@ export default function App() {
           </button>
           <button
             onClick={() => setTab("route")}
-            className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-md text-sm font-medium transition-colors"
+            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-md text-xs sm:text-sm font-medium transition-colors"
             style={{
               background: tab === "route" ? "#1E9EA8" : "transparent",
               color: tab === "route" ? "#0B0D10" : "#8A94A6",
@@ -1050,9 +1051,24 @@ export default function App() {
             <RouteIcon size={16} />
             Calcular rota
           </button>
+          <button
+            onClick={() => setTab("otdr")}
+            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-md text-xs sm:text-sm font-medium transition-colors"
+            style={{
+              background: tab === "otdr" ? "#1E9EA8" : "transparent",
+              color: tab === "otdr" ? "#0B0D10" : "#8A94A6",
+            }}
+          >
+            <MapPin size={16} />
+            Mapa OTDR
+          </button>
         </div>
 
-        {tab === "fiber" ? <FiberTab /> : <RouteTab />}
+        {tab === "fiber" && <FiberTab />}
+        {tab === "route" && <RouteTab />}
+        <div style={{ display: tab === "otdr" ? "block" : "none" }}>
+          <OtdrTab active={tab === "otdr"} />
+        </div>
       </div>
     </div>
   );
