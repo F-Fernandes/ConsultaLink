@@ -143,34 +143,61 @@ export function parseSor(buf) {
   }
 
   // ---- KeyEvents ----
-  const ke = openBlock("KeyEvents");
-  if (!ke) throw new Error("Bloco KeyEvents não encontrado no .sor.");
-  const nEv = ke.u16();
-  if (nEv > 5000) throw new Error("Quantidade de eventos inválida no .sor.");
+  const ke0 = openBlock("KeyEvents");
+  if (!ke0) throw new Error("Bloco KeyEvents não encontrado no .sor.");
   const metersPerUnit = 0.0299792458 / ior; // 1 unidade = 100 ps (ida)
-  const events = [];
-  for (let i = 0; i < nEv; i++) {
-    const n = ke.u16();
-    const t = ke.u32();
-    const attCoef = ke.i16() / 1000;
-    const lossDb = ke.i16() / 1000;
-    const reflDb = ke.i32() / 1000;
-    const code = ke.str(6);
-    ke.str(2); // técnica de medição de perda
-    ke.skip(16); // marcadores
-    const comment = ke.cstr();
-    events.push({
-      n,
-      distM: t * metersPerUnit,
-      attCoef,
-      lossDb,
-      reflDb,
-      code,
-      reflective: code[0] === "1" || code[0] === "2",
-      endOfFiber: code[1] === "E" || code[1] === "D",
-      comment,
-    });
+  const keBlock = blocks.find((x) => x.name === "KeyEvents");
+  const keEnd = keBlock.start + keBlock.size;
+
+  // O nº de marcadores por evento varia (5 na v2 do SR-4731; alguns arquivos
+  // antigos têm 4). Testa as duas leituras e fica com a que fecha certinho.
+  const readEvents = (markerBytes) => {
+    const ke = openBlock("KeyEvents");
+    const nEv = ke.u16();
+    if (nEv > 5000) throw new Error("Quantidade de eventos inválida");
+    const list = [];
+    for (let i = 0; i < nEv; i++) {
+      const n = ke.u16();
+      if (n !== i + 1) throw new Error("Numeração de eventos fora de sequência");
+      const t = ke.u32();
+      const attCoef = ke.i16() / 1000;
+      const lossDb = ke.i16() / 1000;
+      const reflDb = ke.i32() / 1000;
+      const code = ke.str(6);
+      ke.str(2); // técnica de medição de perda
+      ke.skip(markerBytes);
+      const comment = ke.cstr();
+      list.push({
+        n,
+        distM: t * metersPerUnit,
+        attCoef,
+        lossDb,
+        reflDb,
+        code,
+        reflective: code[0] === "1" || code[0] === "2",
+        endOfFiber: code[1] === "E" || code[1] === "D",
+        comment: comment.trim(),
+      });
+    }
+    return { list, endPos: ke.pos };
+  };
+
+  let events = [];
+  let parsedOk = false;
+  for (const markerBytes of v2 ? [20, 16] : [16, 20]) {
+    try {
+      const res = readEvents(markerBytes);
+      // depois dos eventos vêm 26 bytes de resumo (perda total, ORL, ...)
+      if (keEnd - res.endPos >= 0 && keEnd - res.endPos <= 64) {
+        events = res.list;
+        parsedOk = true;
+        break;
+      }
+    } catch {
+      /* tenta a outra variante */
+    }
   }
+  if (!parsedOk) throw new Error("Não consegui interpretar a tabela de eventos deste .sor.");
   if (!events.length) warnings.push("Nenhum evento encontrado no .sor.");
 
   const spanM = events.length ? events[events.length - 1].distM : 0;

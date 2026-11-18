@@ -3,7 +3,8 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Upload, Download } from "lucide-react";
 import { parseSor, eventLabel } from "./otdr/sor.js";
-import { readKmz, exportKmz } from "./otdr/kmz.js";
+import { readKmz, exportRouteKmz } from "./otdr/kmz.js";
+import { buildGraph, findRoute } from "./otdr/graph.js";
 import * as G from "./otdr/route.js";
 
 const COLORS = { both: "#C4544A", A: "#4C8DFF", B: "#F0C231" };
@@ -16,9 +17,14 @@ const n = (v, d = 0) => {
 
 const card = { background: "#14171C", border: "1px solid #262B33" };
 const mono = { fontFamily: "'JetBrains Mono', monospace" };
+const ghostBtn = (enabled = true) => ({
+  background: "#0B0D10",
+  color: enabled ? "#C4CBD6" : "#5C6472",
+  border: "1px solid #262B33",
+});
 
 /* ---------- componentes pequenos ---------- */
-function FileSlot({ title, hint, accept, summary, onFile, error, accent }) {
+function FileSlot({ title, hint, accept, summary, onFile, onClear, error, accent }) {
   return (
     <label
       className="block rounded-lg p-3 cursor-pointer"
@@ -36,7 +42,21 @@ function FileSlot({ title, hint, accept, summary, onFile, error, accent }) {
       />
       <div className="flex items-center gap-2 text-sm" style={{ color: "#E9ECEF" }}>
         <Upload size={14} style={{ color: accent }} />
-        {title}
+        <span className="flex-1">{title}</span>
+        {summary && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onClear();
+            }}
+            className="text-[11px] px-1.5 py-0.5 rounded"
+            style={{ color: "#C4544A", border: "1px solid #3a2a2a" }}
+          >
+            remover
+          </button>
+        )}
       </div>
       <div className="text-xs mt-1 break-words" style={{ color: error ? "#C4544A" : "#8A94A6" }}>
         {error || summary || hint}
@@ -91,10 +111,19 @@ function SideSelect({ label, value, onChange }) {
         className="w-full rounded-md px-2 py-1.5 text-sm outline-none"
         style={{ background: "#0B0D10", color: "#E9ECEF", border: "1px solid #262B33" }}
       >
-        <option value="start">Início da rota</option>
-        <option value="end">Fim da rota</option>
+        <option value="start">Ponta A</option>
+        <option value="end">Ponta B</option>
       </select>
     </div>
+  );
+}
+
+function Legend({ color, label }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="inline-block rounded-full" style={{ width: 9, height: 9, background: color }} />
+      {label}
+    </span>
   );
 }
 
@@ -114,6 +143,16 @@ function popupHtml(it) {
   );
 }
 
+const endIcon = (letter, color) =>
+  L.divIcon({
+    className: "",
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    html: `<div style="width:24px;height:24px;border-radius:50%;background:${color};color:#0B0D10;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font:700 12px sans-serif">${letter}</div>`,
+  });
+
+const fmtPt = (p) => (p ? `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}` : "não definida");
+
 /* ---------------------------------------------------------
    Aba principal
 --------------------------------------------------------- */
@@ -124,7 +163,11 @@ export default function OtdrTab({ active }) {
   const [err, setErr] = useState({});
   const [busy, setBusy] = useState(false);
 
-  const [flipped, setFlipped] = useState(false);
+  const [pointA, setPointA] = useState(null);
+  const [pointB, setPointB] = useState(null);
+  const [pick, setPick] = useState(null);
+  const [layerOff, setLayerOff] = useState({});
+
   const [sideA, setSideA] = useState("start");
   const [sideB, setSideB] = useState("start");
   const [offA, setOffA] = useState("0");
@@ -135,7 +178,7 @@ export default function OtdrTab({ active }) {
   const [boxFilter, setBoxFilter] = useState("");
   const [boxMaxDist, setBoxMaxDist] = useState("40");
   const [useMarkers, setUseMarkers] = useState(true);
-  const [useJoints, setUseJoints] = useState(true);
+  const [useJoints, setUseJoints] = useState(false);
   const [joinTol, setJoinTol] = useState("30");
   const [threshold, setThreshold] = useState("0.1");
   const [matchTol, setMatchTol] = useState("15");
@@ -144,14 +187,17 @@ export default function OtdrTab({ active }) {
   const mapRef = useRef(null);
   const layerRef = useRef(null);
   const markersRef = useRef({});
+  const pickRef = useRef(null);
 
-  /* ---------- upload ---------- */
+  /* ---------- upload / limpar ---------- */
   const loadKmz = async (file) => {
     try {
       setBusy(true);
       const k = await readKmz(file);
       setKmz(k);
-      setFlipped(false);
+      setPointA(null);
+      setPointB(null);
+      setLayerOff({});
       setErr((e) => ({ ...e, kmz: null }));
     } catch (e) {
       setErr((p) => ({ ...p, kmz: e.message }));
@@ -172,33 +218,78 @@ export default function OtdrTab({ active }) {
     }
   };
 
-  /* ---------- rota ---------- */
-  const route = useMemo(() => {
-    if (!kmz) return null;
-    const r = buildRouteSafe(kmz.lines, n(joinTol, 30));
-    if (flipped) {
-      const len = r.coords.length;
-      r.coords = [...r.coords].reverse();
-      r.joints = r.joints.map((j) => ({ index: len - 1 - j.index })).sort((a, b) => a.index - b.index);
-    }
-    const cum = G.cumulative(r.coords);
-    return { ...r, cum, total: cum.length ? cum[cum.length - 1] : 0 };
-  }, [kmz, joinTol, flipped]);
+  const clearKmz = () => {
+    setKmz(null);
+    setPointA(null);
+    setPointB(null);
+    setPick(null);
+    setLayerOff({});
+    setErr((p) => ({ ...p, kmz: null, export: null }));
+  };
+  const clearAll = () => {
+    clearKmz();
+    setSorA(null);
+    setSorB(null);
+    setErr({});
+  };
 
+  /* ---------- camadas, trechos e pontas ---------- */
+  const activeLines = useMemo(
+    () => (kmz ? kmz.lines.filter((l) => !layerOff[l.layer]) : []),
+    [kmz, layerOff]
+  );
+  const activePoints = useMemo(
+    () => (kmz ? kmz.points.filter((p) => !layerOff[p.layer]) : []),
+    [kmz, layerOff]
+  );
+
+  const baseGraph = useMemo(
+    () => (activeLines.length ? buildGraph(activeLines, n(joinTol, 30)) : null),
+    [activeLines, joinTol]
+  );
+  const freeEnds = baseGraph ? baseGraph.freeEnds : [];
+  const autoEnds = !pointA && !pointB && freeEnds.length === 2;
+  const endA = pointA || (autoEnds ? freeEnds[0] : null);
+  const endB = pointB || (autoEnds ? freeEnds[1] : null);
+
+  const routeRes = useMemo(
+    () => (endA && endB && activeLines.length ? findRoute(activeLines, endA, endB, n(joinTol, 30)) : null),
+    [activeLines, endA, endB, joinTol]
+  );
+
+  const route = useMemo(() => {
+    if (!routeRes || routeRes.error) return null;
+    const cum = G.cumulative(routeRes.coords);
+    return { ...routeRes, cum, total: cum[cum.length - 1] };
+  }, [routeRes]);
+
+  const swapEnds = () => {
+    if (!endA || !endB) return;
+    setPointA({ lat: endB.lat, lon: endB.lon });
+    setPointB({ lat: endA.lat, lon: endA.lon });
+  };
+
+  /* ---------- caixas de emenda ---------- */
   const boxes = useMemo(() => {
-    if (!route || !route.coords.length) return [];
+    if (!route) return [];
     const list = [];
     if (useMarkers) {
       const terms = boxFilter
         .split(",")
         .map((t) => t.trim().toLowerCase())
         .filter(Boolean);
-      for (const p of kmz.points) {
+      for (const p of activePoints) {
         const nm = (p.name || "").toLowerCase();
         if (terms.length && !terms.some((t) => nm.includes(t))) continue;
         const pr = G.projectOnRoute([p.lat, p.lon], route.coords, route.cum);
         if (pr.dist <= n(boxMaxDist, 40)) {
-          list.push({ name: p.name || "Caixa", pos: pr.pos, latlon: pr.point, source: "marcador" });
+          list.push({
+            name: p.name || "Caixa",
+            pos: pr.pos,
+            latlon: pr.point,
+            orig: [p.lat, p.lon],
+            source: "marcador",
+          });
         }
       }
     }
@@ -213,16 +304,14 @@ export default function OtdrTab({ active }) {
       );
     }
     return G.dedupeBoxes(list);
-  }, [route, kmz, useMarkers, useJoints, boxFilter, boxMaxDist]);
+  }, [route, activePoints, useMarkers, useJoints, boxFilter, boxMaxDist]);
 
   const ctx = useMemo(
-    () =>
-      route && route.coords.length
-        ? { coords: route.coords, cum: route.cum, total: route.total, boxes }
-        : null,
+    () => (route ? { coords: route.coords, cum: route.cum, total: route.total, boxes } : null),
     [route, boxes]
   );
 
+  /* ---------- eventos dos .sor ---------- */
   const reserveOpts = {
     boxReserveM: n(boxRes, 20),
     everyM: n(everyM, 500),
@@ -253,6 +342,11 @@ export default function OtdrTab({ active }) {
 
   /* ---------- mapa ---------- */
   useEffect(() => {
+    pickRef.current = pick;
+    if (mapRef.current) mapRef.current.getContainer().style.cursor = pick ? "crosshair" : "";
+  }, [pick]);
+
+  useEffect(() => {
     if (mapRef.current || !mapEl.current) return undefined;
     const map = L.map(mapEl.current).setView([-15.78, -47.93], 4);
     const sat = L.tileLayer(
@@ -266,6 +360,14 @@ export default function OtdrTab({ active }) {
     streets.addTo(map);
     L.control.layers({ Ruas: streets, Satélite: sat }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
+    map.on("click", (e) => {
+      const mode = pickRef.current;
+      if (!mode) return;
+      const p = { lat: e.latlng.lat, lon: e.latlng.lng };
+      if (mode === "A") setPointA(p);
+      else setPointB(p);
+      setPick(null);
+    });
     mapRef.current = map;
     return () => {
       map.remove();
@@ -283,19 +385,43 @@ export default function OtdrTab({ active }) {
     if (!map || !g) return;
     g.clearLayers();
     markersRef.current = {};
-    if (!route || !route.coords.length) return;
-    L.polyline(route.coords, { color: "#1E9EA8", weight: 4, opacity: 0.95 }).addTo(g);
-    boxes.forEach((b) =>
-      L.circleMarker(b.latlon, {
-        radius: 5,
-        color: "#0B0D10",
-        weight: 1,
-        fillColor: "#D97A29",
-        fillOpacity: 1,
-      })
-        .bindTooltip(`${b.name} · ${G.fmtM(b.pos, 0)} m`)
-        .addTo(g)
+
+    // trechos ativos (de fundo)
+    activeLines.forEach((l) =>
+      L.polyline(l.coords, {
+        color: route ? "#6B7685" : "#1E9EA8",
+        weight: route ? 2 : 3,
+        opacity: route ? 0.6 : 0.9,
+      }).addTo(g)
     );
+    // pontas livres (ajuda a escolher A e B)
+    if (!route) {
+      freeEnds.slice(0, 60).forEach((p) =>
+        L.circleMarker([p.lat, p.lon], {
+          radius: 4,
+          color: "#fff",
+          weight: 1,
+          fillColor: "#0B0D10",
+          fillOpacity: 1,
+        })
+          .bindTooltip("ponta livre do traçado")
+          .addTo(g)
+      );
+    }
+    if (route) {
+      L.polyline(route.coords, { color: "#1E9EA8", weight: 5, opacity: 0.95 }).addTo(g);
+      boxes.forEach((b) =>
+        L.circleMarker(b.latlon, {
+          radius: 5,
+          color: "#0B0D10",
+          weight: 1,
+          fillColor: "#D97A29",
+          fillOpacity: 1,
+        })
+          .bindTooltip(`${b.name} · ${G.fmtM(b.pos, 0)} m`)
+          .addTo(g)
+      );
+    }
     merged.forEach((it) => {
       const m = L.circleMarker([it.lat, it.lon], {
         radius: 8,
@@ -308,13 +434,18 @@ export default function OtdrTab({ active }) {
         .addTo(g);
       markersRef.current[it.id] = m;
     });
-  }, [route, boxes, merged]);
+    const aPos = route ? route.coords[0] : endA ? [endA.lat, endA.lon] : null;
+    const bPos = route ? route.coords[route.coords.length - 1] : endB ? [endB.lat, endB.lon] : null;
+    if (aPos) L.marker(aPos, { icon: endIcon("A", "#4FAE7A"), interactive: false }).addTo(g);
+    if (bPos) L.marker(bPos, { icon: endIcon("B", "#E3B84A"), interactive: false }).addTo(g);
+  }, [activeLines, freeEnds, route, boxes, merged, endA, endB]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !route || !route.coords.length) return;
-    map.fitBounds(L.latLngBounds(route.coords), { padding: [30, 30] });
-  }, [kmz]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!map || !kmz) return;
+    const pts = kmz.lines.flatMap((l) => l.coords);
+    if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [30, 30] });
+  }, [kmz]);
 
   const focusItem = (it) => {
     const m = markersRef.current[it.id];
@@ -328,15 +459,22 @@ export default function OtdrTab({ active }) {
   /* ---------- exportar ---------- */
   const download = async () => {
     try {
-      const blob = await exportKmz(kmz, merged);
       const base = kmz.fileName.replace(/\.(kmz|kml)$/i, "");
+      const blob = await exportRouteKmz({
+        title: `${base} - rota A-B com atenuações`,
+        coords: route.coords,
+        totalM: route.total,
+        boxes,
+        items: merged,
+      });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `${base}_atenuacoes.kmz`;
+      a.download = `${base}_rota_atenuacoes.kmz`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      setErr((p) => ({ ...p, export: null }));
     } catch (e) {
       setErr((p) => ({ ...p, export: e.message }));
     }
@@ -353,35 +491,61 @@ export default function OtdrTab({ active }) {
   const dB = diag(sorB, locB, n(offB));
 
   const beyond = merged.filter((it) => (it.a && it.a.beyondM > 5) || (it.b && it.b.beyondM > 5)).length;
-  const warnings = [...(route ? route.warnings : [])];
+  const warnings = [];
+  if (route) {
+    warnings.push(...route.warnings);
+    if (route.gaps.length)
+      warnings.push(
+        `${route.gaps.length} vazio(s) entre trechos foram ligados em linha reta (maior: ${G.fmtM(route.maxGapM, 0)} m).`
+      );
+    if (route.usedTol > n(joinTol, 30))
+      warnings.push(`A tolerância de ligação foi aumentada automaticamente para ${route.usedTol} m.`);
+    if (!boxes.length)
+      warnings.push("Nenhuma caixa de emenda identificada; as reservas por caixa não foram aplicadas.");
+  }
   if (beyond) warnings.push(`${beyond} evento(s) ficam além do fim da rota (fibra medida maior que o traçado).`);
-  if (kmz && ctx && !boxes.length)
-    warnings.push("Nenhuma caixa de emenda identificada; as reservas por caixa não foram aplicadas.");
 
+  const sorSummary = (s) =>
+    s
+      ? `${s.name} · ${s.wavelengthNm} nm · ${s.events.length} eventos · ${G.fmtM(s.spanM, 0)} m`
+      : null;
   const kmzSummary = kmz
     ? `${kmz.fileName} · ${kmz.lines.length} trecho(s) · ${kmz.points.length} ponto(s)`
     : null;
-  const sorSummary = (s) =>
-    s
-      ? `${s.name} · ${s.wavelengthNm} nm · ${s.events.length} eventos · ${G.fmtM(s.spanM, 0)} m` +
-        (s.fiberId ? ` · fibra ${s.fiberId}` : "")
-      : null;
+
+  const setAllLayers = (on) => {
+    if (!kmz) return;
+    const next = {};
+    if (!on) kmz.layers.forEach((l) => (next[l.name] = true));
+    setLayerOff(next);
+  };
 
   return (
     <div className="flex flex-col gap-5">
-      {/* 1. Arquivos */}
+      {/* Arquivos */}
       <div className="rounded-xl p-5" style={card}>
-        <div className="text-sm font-medium mb-3" style={{ color: "#E9ECEF" }}>
-          Arquivos
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-medium" style={{ color: "#E9ECEF" }}>
+            Arquivos
+          </div>
+          <button
+            onClick={clearAll}
+            disabled={!kmz && !sorA && !sorB}
+            className="text-xs px-3 py-1.5 rounded-md"
+            style={ghostBtn(!!(kmz || sorA || sorB))}
+          >
+            Limpar tudo
+          </button>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <FileSlot
             title="Traçado (KMZ/KML)"
-            hint="Linhas dos trechos e marcadores das caixas"
+            hint="Trechos e marcadores das caixas"
             accept=".kmz,.kml"
             summary={busy ? "Lendo arquivo…" : kmzSummary}
             error={err.kmz}
             onFile={loadKmz}
+            onClear={clearKmz}
             accent="#1E9EA8"
           />
           <FileSlot
@@ -391,6 +555,7 @@ export default function OtdrTab({ active }) {
             summary={sorSummary(sorA)}
             error={err.A}
             onFile={(f) => loadSor("A", f)}
+            onClear={() => setSorA(null)}
             accent={COLORS.A}
           />
           <FileSlot
@@ -400,26 +565,139 @@ export default function OtdrTab({ active }) {
             summary={sorSummary(sorB)}
             error={err.B}
             onFile={(f) => loadSor("B", f)}
+            onClear={() => setSorB(null)}
             accent={COLORS.B}
           />
         </div>
-        {(sorA?.warnings || []).concat(sorB?.warnings || []).map((w, i) => (
+        {[...(sorA ? sorA.warnings : []), ...(sorB ? sorB.warnings : [])].map((w, i) => (
           <p key={i} className="text-xs mt-2" style={{ color: "#E3B84A" }}>
             {w}
           </p>
         ))}
       </div>
 
-      {/* 2. Parâmetros */}
+      {/* Camadas do KMZ */}
+      {kmz && kmz.layers.length > 1 && (
+        <details className="rounded-xl p-5" style={card} open={kmz.layers.length <= 12}>
+          <summary className="text-sm font-medium cursor-pointer" style={{ color: "#E9ECEF" }}>
+            Camadas do KMZ{" "}
+            <span style={{ color: "#5C6472" }}>
+              ({kmz.layers.filter((l) => !layerOff[l.name]).length} de {kmz.layers.length} ativas)
+            </span>
+          </summary>
+          <p className="text-xs mt-2 mb-3" style={{ color: "#8A94A6" }}>
+            Marque só as pastas que fazem parte desta rota (cabos e caixas). Pastas de outras rotas
+            atrapalham a ligação dos trechos.
+          </p>
+          <div className="flex gap-2 mb-3">
+            <button onClick={() => setAllLayers(true)} className="text-xs px-2.5 py-1 rounded-md" style={ghostBtn()}>
+              Marcar todas
+            </button>
+            <button onClick={() => setAllLayers(false)} className="text-xs px-2.5 py-1 rounded-md" style={ghostBtn()}>
+              Desmarcar todas
+            </button>
+          </div>
+          <div className="flex flex-col gap-1 overflow-y-auto" style={{ maxHeight: 260 }}>
+            {kmz.layers.map((l) => (
+              <label
+                key={l.name}
+                className="flex items-start gap-2 text-xs py-1"
+                style={{ color: layerOff[l.name] ? "#5C6472" : "#C4CBD6" }}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!layerOff[l.name]}
+                  onChange={(e) => setLayerOff((p) => ({ ...p, [l.name]: !e.target.checked }))}
+                />
+                <span className="flex-1 break-words">{l.name}</span>
+                <span className="whitespace-nowrap" style={{ ...mono, color: "#5C6472" }}>
+                  {l.lines > 0 && `${l.lines} lin · ${G.fmtM(l.km, 1)} km`}
+                  {l.lines > 0 && l.points > 0 && " · "}
+                  {l.points > 0 && `${l.points} pts`}
+                </span>
+              </label>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {/* Pontas A e B */}
+      {kmz && (
+        <div className="rounded-xl p-5" style={card}>
+          <div className="text-sm font-medium mb-1" style={{ color: "#E9ECEF" }}>
+            Pontas da rota (A e B)
+          </div>
+          <p className="text-xs mb-3" style={{ color: "#8A94A6" }}>
+            {autoEnds
+              ? "O traçado tem só duas pontas livres; usei como A e B. Se o OTDR mediu do outro lado, use Inverter."
+              : "Toque em Definir A (ou B) e depois no mapa, sobre o traçado. A ponta A é de onde a medição OTDR começa."}
+          </p>
+          <div className="flex flex-wrap gap-2 mb-3">
+            <button
+              onClick={() => setPick(pick === "A" ? null : "A")}
+              className="text-xs px-3 py-1.5 rounded-md"
+              style={
+                pick === "A"
+                  ? { background: "#4FAE7A", color: "#0B0D10", border: "1px solid #4FAE7A", fontWeight: 600 }
+                  : ghostBtn()
+              }
+            >
+              {pick === "A" ? "Toque no mapa para a ponta A…" : "Definir A no mapa"}
+            </button>
+            <button
+              onClick={() => setPick(pick === "B" ? null : "B")}
+              className="text-xs px-3 py-1.5 rounded-md"
+              style={
+                pick === "B"
+                  ? { background: "#E3B84A", color: "#0B0D10", border: "1px solid #E3B84A", fontWeight: 600 }
+                  : ghostBtn()
+              }
+            >
+              {pick === "B" ? "Toque no mapa para a ponta B…" : "Definir B no mapa"}
+            </button>
+            <button
+              onClick={swapEnds}
+              disabled={!endA || !endB}
+              className="text-xs px-3 py-1.5 rounded-md"
+              style={ghostBtn(!!(endA && endB))}
+            >
+              Inverter A e B
+            </button>
+            <button
+              onClick={() => {
+                setPointA(null);
+                setPointB(null);
+              }}
+              disabled={!pointA && !pointB}
+              className="text-xs px-3 py-1.5 rounded-md"
+              style={ghostBtn(!!(pointA || pointB))}
+            >
+              Limpar pontas
+            </button>
+          </div>
+          <div className="text-xs flex flex-col gap-0.5" style={{ ...mono, color: "#8A94A6" }}>
+            <span>A: {fmtPt(endA)}</span>
+            <span>B: {fmtPt(endB)}</span>
+          </div>
+          {routeRes && routeRes.error && (
+            <p className="text-xs mt-3" style={{ color: "#C4544A" }}>
+              {routeRes.error}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Parâmetros */}
       <details className="rounded-xl p-5" style={card} open>
         <summary className="text-sm font-medium cursor-pointer" style={{ color: "#E9ECEF" }}>
           Parâmetros
         </summary>
         <div className="mt-4 flex flex-col gap-4">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <SideSelect label="Fibra A medida a partir do" value={sideA} onChange={setSideA} />
+            <SideSelect label="Fibra A medida a partir da" value={sideA} onChange={setSideA} />
             <Field label="Offset da fibra A (lançamento)" value={offA} onChange={setOffA} unit="m" />
-            <SideSelect label="Fibra B medida a partir do" value={sideB} onChange={setSideB} />
+            <SideSelect label="Fibra B medida a partir da" value={sideB} onChange={setSideB} />
             <Field label="Offset da fibra B (lançamento)" value={offB} onChange={setOffB} unit="m" />
           </div>
           <div className="grid grid-cols-3 gap-3">
@@ -430,7 +708,7 @@ export default function OtdrTab({ active }) {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <Field label="Perda mínima exibida" value={threshold} onChange={setThreshold} unit="dB" />
             <Field label="Tolerância ponto em comum" value={matchTol} onChange={setMatchTol} unit="m" />
-            <Field label="Tolerância de junção" value={joinTol} onChange={setJoinTol} unit="m" />
+            <Field label="Ligar trechos até" value={joinTol} onChange={setJoinTol} unit="m" />
             <Field label="Distância máx. caixa–rota" value={boxMaxDist} onChange={setBoxMaxDist} unit="m" />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
@@ -451,29 +729,15 @@ export default function OtdrTab({ active }) {
               </label>
             </div>
           </div>
-          <div>
-            <button
-              onClick={() => setFlipped(!flipped)}
-              disabled={!kmz}
-              className="text-xs px-3 py-1.5 rounded-md"
-              style={{
-                background: "#0B0D10",
-                color: kmz ? "#C4CBD6" : "#5C6472",
-                border: "1px solid #262B33",
-              }}
-            >
-              Inverter sentido da rota (início e fim)
-            </button>
-          </div>
         </div>
       </details>
 
       {/* Avisos e diagnóstico */}
-      {(warnings.length > 0 || dA || dB || ctx) && (
+      {(warnings.length > 0 || dA || dB || route) && (
         <div className="rounded-xl p-4 text-xs flex flex-col gap-1.5" style={card}>
-          {ctx && (
+          {route && (
             <div style={{ color: "#C4CBD6" }}>
-              Rota consolidada: <b style={mono}>{G.fmtM(ctx.total, 0)} m</b> · {route.segments} trecho(s) ·{" "}
+              Rota A→B: <b style={mono}>{G.fmtM(route.total, 0)} m</b> · {route.segments} trecho(s) ·{" "}
               {boxes.length} caixa(s)
             </div>
           )}
@@ -503,9 +767,10 @@ export default function OtdrTab({ active }) {
 
       {/* Mapa */}
       <div className="rounded-xl p-3" style={card}>
-        <div ref={mapEl} style={{ height: 440, borderRadius: 8, overflow: "hidden", background: "#0B0D10" }} />
+        <div ref={mapEl} style={{ height: 460, borderRadius: 8, overflow: "hidden", background: "#0B0D10" }} />
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 px-1 text-[11px]" style={{ color: "#8A94A6" }}>
-          <Legend color="#1E9EA8" label="Rota" />
+          <Legend color="#1E9EA8" label="Rota A→B" />
+          <Legend color="#6B7685" label="Outros trechos" />
           <Legend color="#D97A29" label="Caixa de emenda" />
           <Legend color={COLORS.A} label="Fibra A" />
           <Legend color={COLORS.B} label="Fibra B" />
@@ -517,22 +782,21 @@ export default function OtdrTab({ active }) {
       <div className="rounded-xl p-5" style={card}>
         <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
           <div className="text-sm font-medium" style={{ color: "#E9ECEF" }}>
-            Pontos de atenuação{" "}
-            <span style={{ color: "#5C6472" }}>({merged.length})</span>
+            Pontos de atenuação <span style={{ color: "#5C6472" }}>({merged.length})</span>
           </div>
           <button
             onClick={download}
-            disabled={!kmz || !merged.length}
+            disabled={!route || !merged.length}
             className="flex items-center gap-2 text-xs px-3 py-2 rounded-md"
             style={{
-              background: kmz && merged.length ? "#1E9EA8" : "#0B0D10",
-              color: kmz && merged.length ? "#0B0D10" : "#5C6472",
+              background: route && merged.length ? "#1E9EA8" : "#0B0D10",
+              color: route && merged.length ? "#0B0D10" : "#5C6472",
               border: "1px solid #262B33",
               fontWeight: 500,
             }}
           >
             <Download size={14} />
-            Baixar KMZ com atenuações
+            Baixar KMZ da rota com atenuações
           </button>
         </div>
         {err.export && (
@@ -542,7 +806,9 @@ export default function OtdrTab({ active }) {
         )}
         {!merged.length ? (
           <p className="text-sm" style={{ color: "#5C6472" }}>
-            Envie o KMZ e ao menos um arquivo .sor para ver os pontos no mapa.
+            {kmz && !route
+              ? "Defina as pontas A e B para montar a rota."
+              : "Envie o KMZ e ao menos um arquivo .sor para ver os pontos no mapa."}
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -602,18 +868,4 @@ export default function OtdrTab({ active }) {
       </div>
     </div>
   );
-}
-
-function Legend({ color, label }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="inline-block rounded-full" style={{ width: 9, height: 9, background: color }} />
-      {label}
-    </span>
-  );
-}
-
-function buildRouteSafe(lines, tol) {
-  const r = G.buildRoute(lines, tol);
-  return { ...r, coords: [...r.coords], joints: [...r.joints] };
 }
