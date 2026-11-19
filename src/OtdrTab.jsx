@@ -7,7 +7,8 @@ import { readKmz, exportRouteKmz } from "./otdr/kmz.js";
 import { buildGraph, findRoute } from "./otdr/graph.js";
 import * as G from "./otdr/route.js";
 
-const COLORS = { both: "#C4544A", A: "#4C8DFF", B: "#F0C231" };
+const COLORS = { both: "#A78BFA", A: "#4C8DFF", B: "#F0C231" };
+const HIGH = "#E5484D";
 const KIND_LABEL = { both: "A + B (em comum)", A: "Só fibra A", B: "Só fibra B" };
 
 const n = (v, d = 0) => {
@@ -136,6 +137,7 @@ function popupHtml(it) {
       : "";
   return (
     `<b>#${it.n} · ${KIND_LABEL[it.kind]}</b><br/>` +
+    (it.high ? `<span style="color:#E5484D"><b>Acima do nível de ajuste</b></span><br/>` : "") +
     row("Fibra A", it.a) +
     row("Fibra B", it.b) +
     `Rota: ${G.fmtM(it.routeM)} m<br/>${G.esc(G.localText(it))}<br/>` +
@@ -182,6 +184,7 @@ export default function OtdrTab({ active }) {
   const [joinTol, setJoinTol] = useState("30");
   const [threshold, setThreshold] = useState("0.1");
   const [matchTol, setMatchTol] = useState("15");
+  const [hiLevel, setHiLevel] = useState("0.5");
 
   const mapEl = useRef(null);
   const mapRef = useRef(null);
@@ -332,13 +335,25 @@ export default function OtdrTab({ active }) {
     [ctx, sorB, sideB, offB, rKey]
   );
 
-  const merged = useMemo(() => {
+  const mergedRaw = useMemo(() => {
     if (!ctx || (!locA && !locB)) return [];
     const th = n(threshold, 0.1);
     const a = locA ? G.filterEvents(locA.events, th) : [];
     const b = locB ? G.filterEvents(locB.events, th) : [];
     return G.mergeFibers(a, b, n(matchTol, 15), ctx);
   }, [ctx, locA, locB, threshold, matchTol]);
+
+  // destaca em vermelho as perdas iguais ou acima do nível escolhido
+  const level = n(hiLevel, 0.5);
+  const merged = useMemo(
+    () =>
+      mergedRaw.map((it) => {
+        const maxLoss = Math.max(Math.abs(it.a ? it.a.lossDb : 0), Math.abs(it.b ? it.b.lossDb : 0));
+        return { ...it, maxLoss, high: maxLoss >= level };
+      }),
+    [mergedRaw, level]
+  );
+  const highCount = merged.filter((it) => it.high).length;
 
   /* ---------- mapa ---------- */
   useEffect(() => {
@@ -424,10 +439,10 @@ export default function OtdrTab({ active }) {
     }
     merged.forEach((it) => {
       const m = L.circleMarker([it.lat, it.lon], {
-        radius: 8,
+        radius: it.high ? 10 : 8,
         color: "#ffffff",
         weight: 2,
-        fillColor: COLORS[it.kind],
+        fillColor: it.high ? HIGH : COLORS[it.kind],
         fillOpacity: 1,
       })
         .bindPopup(popupHtml(it))
@@ -466,6 +481,7 @@ export default function OtdrTab({ active }) {
         totalM: route.total,
         boxes,
         items: merged,
+        level,
       });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -622,69 +638,114 @@ export default function OtdrTab({ active }) {
         </details>
       )}
 
-      {/* Pontas A e B */}
-      {kmz && (
-        <div className="rounded-xl p-5" style={card}>
-          <div className="text-sm font-medium mb-1" style={{ color: "#E9ECEF" }}>
-            Pontas da rota (A e B)
-          </div>
-          <p className="text-xs mb-3" style={{ color: "#8A94A6" }}>
-            {autoEnds
-              ? "O traçado tem só duas pontas livres; usei como A e B. Se o OTDR mediu do outro lado, use Inverter."
-              : "Toque em Definir A (ou B) e depois no mapa, sobre o traçado. A ponta A é de onde a medição OTDR começa."}
-          </p>
-          <div className="flex flex-wrap gap-2 mb-3">
-            <button
-              onClick={() => setPick(pick === "A" ? null : "A")}
-              className="text-xs px-3 py-1.5 rounded-md"
-              style={
-                pick === "A"
-                  ? { background: "#4FAE7A", color: "#0B0D10", border: "1px solid #4FAE7A", fontWeight: 600 }
-                  : ghostBtn()
-              }
-            >
-              {pick === "A" ? "Toque no mapa para a ponta A…" : "Definir A no mapa"}
-            </button>
-            <button
-              onClick={() => setPick(pick === "B" ? null : "B")}
-              className="text-xs px-3 py-1.5 rounded-md"
-              style={
-                pick === "B"
-                  ? { background: "#E3B84A", color: "#0B0D10", border: "1px solid #E3B84A", fontWeight: 600 }
-                  : ghostBtn()
-              }
-            >
-              {pick === "B" ? "Toque no mapa para a ponta B…" : "Definir B no mapa"}
-            </button>
-            <button
-              onClick={swapEnds}
-              disabled={!endA || !endB}
-              className="text-xs px-3 py-1.5 rounded-md"
-              style={ghostBtn(!!(endA && endB))}
-            >
-              Inverter A e B
-            </button>
-            <button
-              onClick={() => {
-                setPointA(null);
-                setPointB(null);
-              }}
-              disabled={!pointA && !pointB}
-              className="text-xs px-3 py-1.5 rounded-md"
-              style={ghostBtn(!!(pointA || pointB))}
-            >
-              Limpar pontas
-            </button>
-          </div>
-          <div className="text-xs flex flex-col gap-0.5" style={{ ...mono, color: "#8A94A6" }}>
-            <span>A: {fmtPt(endA)}</span>
-            <span>B: {fmtPt(endB)}</span>
-          </div>
-          {routeRes && routeRes.error && (
-            <p className="text-xs mt-3" style={{ color: "#C4544A" }}>
-              {routeRes.error}
+      {/* Mapa */}
+      <div className="rounded-xl p-3" style={card}>
+        {kmz && (
+          <div className="px-1 pb-3 mb-3" style={{ borderBottom: "1px solid #262B33" }}>
+            <div className="flex flex-wrap items-end gap-2">
+              <button
+                onClick={() => setPick(pick === "A" ? null : "A")}
+                className="text-xs px-3 py-2 rounded-md"
+                style={
+                  pick === "A"
+                    ? { background: "#4FAE7A", color: "#0B0D10", border: "1px solid #4FAE7A", fontWeight: 600 }
+                    : ghostBtn()
+                }
+              >
+                {pick === "A" ? "Toque no mapa: ponta A…" : "Definir A"}
+              </button>
+              <button
+                onClick={() => setPick(pick === "B" ? null : "B")}
+                className="text-xs px-3 py-2 rounded-md"
+                style={
+                  pick === "B"
+                    ? { background: "#E3B84A", color: "#0B0D10", border: "1px solid #E3B84A", fontWeight: 600 }
+                    : ghostBtn()
+                }
+              >
+                {pick === "B" ? "Toque no mapa: ponta B…" : "Definir B"}
+              </button>
+              <button
+                onClick={swapEnds}
+                disabled={!endA || !endB}
+                className="text-xs px-3 py-2 rounded-md"
+                style={ghostBtn(!!(endA && endB))}
+              >
+                Inverter A e B
+              </button>
+              <button
+                onClick={() => {
+                  setPointA(null);
+                  setPointB(null);
+                }}
+                disabled={!pointA && !pointB}
+                className="text-xs px-3 py-2 rounded-md"
+                style={ghostBtn(!!(pointA || pointB))}
+              >
+                Limpar pontas
+              </button>
+              <div style={{ width: 170 }}>
+                <Field label="Destacar perdas acima de" value={hiLevel} onChange={setHiLevel} unit="dB" />
+              </div>
+            </div>
+            <div className="text-[11px] mt-2 flex flex-wrap gap-x-4 gap-y-0.5" style={{ ...mono, color: "#8A94A6" }}>
+              <span>A: {fmtPt(endA)}</span>
+              <span>B: {fmtPt(endB)}</span>
+            </div>
+            <p className="text-[11px] mt-1.5" style={{ color: "#5C6472" }}>
+              {autoEnds
+                ? "O traçado tem só duas pontas livres; usei como A e B. A ponta A é onde o OTDR foi ligado: se foi do outro lado, use Inverter."
+                : "Toque em Definir A (ou B) e depois no mapa, sobre o traçado. A ponta A é onde o OTDR foi ligado."}
             </p>
+            {routeRes && routeRes.error && (
+              <p className="text-xs mt-1.5" style={{ color: "#C4544A" }}>
+                {routeRes.error}
+              </p>
+            )}
+          </div>
+        )}
+        <div ref={mapEl} style={{ height: 460, borderRadius: 8, overflow: "hidden", background: "#0B0D10" }} />
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 px-1 text-[11px]" style={{ color: "#8A94A6" }}>
+          <Legend color="#1E9EA8" label="Rota A→B" />
+          <Legend color="#6B7685" label="Outros trechos" />
+          <Legend color="#D97A29" label="Caixa de emenda" />
+          <Legend color={COLORS.A} label="Fibra A" />
+          <Legend color={COLORS.B} label="Fibra B" />
+          <Legend color={COLORS.both} label="Em comum (A+B)" />
+          <Legend color={HIGH} label="Acima do nível" />
+        </div>
+      </div>
+
+      {/* Avisos e diagnóstico */}
+      {(warnings.length > 0 || dA || dB || route) && (
+        <div className="rounded-xl p-4 text-xs flex flex-col gap-1.5" style={card}>
+          {route && (
+            <div style={{ color: "#C4CBD6" }}>
+              Rota A→B: <b style={mono}>{G.fmtM(route.total, 0)} m</b> · {route.segments} trecho(s) ·{" "}
+              {boxes.length} caixa(s)
+            </div>
           )}
+          {[
+            ["A", dA],
+            ["B", dB],
+          ].map(
+            ([lbl, d]) =>
+              d && (
+                <div key={lbl} style={{ color: "#8A94A6" }}>
+                  Fibra {lbl}: medida <span style={mono}>{G.fmtM(d.span, 0)} m</span> · esperado pela rota +
+                  reservas <span style={mono}>{G.fmtM(d.expected, 0)} m</span> · diferença{" "}
+                  <span style={{ ...mono, color: Math.abs(d.diff) > 100 ? "#E3B84A" : "#4FAE7A" }}>
+                    {d.diff >= 0 ? "+" : ""}
+                    {G.fmtM(d.diff, 0)} m
+                  </span>
+                </div>
+              )
+          )}
+          {warnings.map((w, i) => (
+            <div key={i} style={{ color: "#E3B84A" }}>
+              {w}
+            </div>
+          ))}
         </div>
       )}
 
@@ -732,71 +793,31 @@ export default function OtdrTab({ active }) {
         </div>
       </details>
 
-      {/* Avisos e diagnóstico */}
-      {(warnings.length > 0 || dA || dB || route) && (
-        <div className="rounded-xl p-4 text-xs flex flex-col gap-1.5" style={card}>
-          {route && (
-            <div style={{ color: "#C4CBD6" }}>
-              Rota A→B: <b style={mono}>{G.fmtM(route.total, 0)} m</b> · {route.segments} trecho(s) ·{" "}
-              {boxes.length} caixa(s)
-            </div>
-          )}
-          {[
-            ["A", dA],
-            ["B", dB],
-          ].map(
-            ([lbl, d]) =>
-              d && (
-                <div key={lbl} style={{ color: "#8A94A6" }}>
-                  Fibra {lbl}: medida <span style={mono}>{G.fmtM(d.span, 0)} m</span> · esperado pela rota +
-                  reservas <span style={mono}>{G.fmtM(d.expected, 0)} m</span> · diferença{" "}
-                  <span style={{ ...mono, color: Math.abs(d.diff) > 100 ? "#E3B84A" : "#4FAE7A" }}>
-                    {d.diff >= 0 ? "+" : ""}
-                    {G.fmtM(d.diff, 0)} m
-                  </span>
-                </div>
-              )
-          )}
-          {warnings.map((w, i) => (
-            <div key={i} style={{ color: "#E3B84A" }}>
-              {w}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Mapa */}
-      <div className="rounded-xl p-3" style={card}>
-        <div ref={mapEl} style={{ height: 460, borderRadius: 8, overflow: "hidden", background: "#0B0D10" }} />
-        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 px-1 text-[11px]" style={{ color: "#8A94A6" }}>
-          <Legend color="#1E9EA8" label="Rota A→B" />
-          <Legend color="#6B7685" label="Outros trechos" />
-          <Legend color="#D97A29" label="Caixa de emenda" />
-          <Legend color={COLORS.A} label="Fibra A" />
-          <Legend color={COLORS.B} label="Fibra B" />
-          <Legend color={COLORS.both} label="Em comum (A+B)" />
-        </div>
-      </div>
-
       {/* Tabela */}
       <div className="rounded-xl p-5" style={card}>
         <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
           <div className="text-sm font-medium" style={{ color: "#E9ECEF" }}>
             Pontos de atenuação <span style={{ color: "#5C6472" }}>({merged.length})</span>
+            {merged.length > 0 && (
+              <span className="text-xs font-normal" style={{ color: highCount ? HIGH : "#5C6472" }}>
+                {" "}
+                · {highCount} acima de {G.fmtM(level, 2)} dB
+              </span>
+            )}
           </div>
           <button
             onClick={download}
-            disabled={!route || !merged.length}
+            disabled={!route}
             className="flex items-center gap-2 text-xs px-3 py-2 rounded-md"
             style={{
-              background: route && merged.length ? "#1E9EA8" : "#0B0D10",
-              color: route && merged.length ? "#0B0D10" : "#5C6472",
+              background: route ? "#1E9EA8" : "#0B0D10",
+              color: route ? "#0B0D10" : "#5C6472",
               border: "1px solid #262B33",
               fontWeight: 500,
             }}
           >
             <Download size={14} />
-            Baixar KMZ da rota com atenuações
+            {merged.length ? "Baixar KMZ da rota com atenuações" : "Baixar KMZ da rota"}
           </button>
         </div>
         {err.export && (
@@ -836,14 +857,17 @@ export default function OtdrTab({ active }) {
                     <td className="py-2 pr-3 whitespace-nowrap">
                       <span
                         className="inline-block rounded-full mr-1.5 align-middle"
-                        style={{ width: 9, height: 9, background: COLORS[it.kind] }}
+                        style={{ width: 9, height: 9, background: it.high ? HIGH : COLORS[it.kind] }}
                       />
                       {it.kind === "both" ? "A+B" : it.kind}
                     </td>
                     <td className="py-2 pr-3" style={mono}>
                       {G.fmtM(it.routeM)}
                     </td>
-                    <td className="py-2 pr-3 whitespace-nowrap" style={mono}>
+                    <td
+                      className="py-2 pr-3 whitespace-nowrap"
+                      style={{ ...mono, color: it.high ? HIGH : undefined, fontWeight: it.high ? 600 : undefined }}
+                    >
                       {it.a && G.fmtM(it.a.lossDb, 2)}
                       {it.a && it.b && " / "}
                       {it.b && G.fmtM(it.b.lossDb, 2)}

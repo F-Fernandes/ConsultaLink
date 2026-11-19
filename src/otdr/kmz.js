@@ -93,7 +93,8 @@ export async function readKmz(file) {
    emenda (com a posição na rota) e os pontos de atenuação
 --------------------------------------------------------- */
 const ICONS = {
-  both: "http://maps.google.com/mapfiles/kml/paddle/red-circle.png",
+  high: "http://maps.google.com/mapfiles/kml/paddle/red-circle.png",
+  both: "http://maps.google.com/mapfiles/kml/paddle/purple-circle.png",
   A: "http://maps.google.com/mapfiles/kml/paddle/blu-circle.png",
   B: "http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png",
 };
@@ -106,8 +107,9 @@ function fiberRow(label, e) {
   );
 }
 
-function describeItem(it) {
+function describeItem(it, level) {
   const rows = [];
+  if (it.high) rows.push(`<b>ACIMA DO NÍVEL DE AJUSTE</b> (≥ ${fmtM(level, 2)} dB)`);
   if (it.a) rows.push(fiberRow("Fibra A", it.a));
   if (it.b) rows.push(fiberRow("Fibra B", it.b));
   rows.push(`Posição na rota: ${fmtM(it.routeM)} m`);
@@ -125,7 +127,7 @@ function titleOf(it) {
 
 const lonlat = (lat, lon) => `${lon},${lat},0`;
 
-export function buildRouteKml({ title, coords, totalM, boxes, items }) {
+export function buildRouteKml({ title, coords, totalM, boxes, items, level = 0.5 }) {
   const styles =
     Object.entries(ICONS)
       .map(
@@ -164,18 +166,19 @@ export function buildRouteKml({ title, coords, totalM, boxes, items }) {
       .join("") +
     `</Folder>`;
 
-  const atnFolder =
-    `<Folder><name>Atenuações OTDR</name>` +
-    items
-      .map(
-        (it) =>
-          `<Placemark><name>${esc(titleOf(it))}</name>` +
-          `<description><![CDATA[${describeItem(it)}]]></description>` +
-          `<styleUrl>#otdr-${it.kind}</styleUrl>` +
-          `<Point><coordinates>${lonlat(it.lat, it.lon)}</coordinates></Point></Placemark>`
-      )
-      .join("") +
-    `</Folder>`;
+  const atnFolder = items.length
+    ? `<Folder><name>Atenuações OTDR</name>` +
+      items
+        .map(
+          (it) =>
+            `<Placemark><name>${esc(titleOf(it))}</name>` +
+            `<description><![CDATA[${describeItem(it, level)}]]></description>` +
+            `<styleUrl>#otdr-${it.high ? "high" : it.kind}</styleUrl>` +
+            `<Point><coordinates>${lonlat(it.lat, it.lon)}</coordinates></Point></Placemark>`
+        )
+        .join("") +
+      `</Folder>`
+    : "";
 
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
